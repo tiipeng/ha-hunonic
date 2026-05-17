@@ -3,10 +3,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import socket
 import time
 from typing import Any
 from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from aiohttp import ClientSession
 
@@ -133,6 +135,10 @@ def publish_switch_command(device: dict[str, Any], user_id: int, turn_on: bool) 
             break
         time.sleep(0.75)
     if not connected:
+        bridge_url = os.environ.get("HUNONIC_MQTT_BRIDGE_URL")
+        if bridge_url:
+            _publish_switch_command_via_bridge(bridge_url, device, user_id, turn_on)
+            return
         raise HunonicMqttError("MQTT connect failed: " + "; ".join(errors[-len(addresses):]))
     client.loop_start()
     try:
@@ -143,6 +149,22 @@ def publish_switch_command(device: dict[str, Any], user_id: int, turn_on: bool) 
         client.disconnect()
     if not info.is_published():
         raise HunonicMqttError("MQTT publish timed out")
+
+
+def _publish_switch_command_via_bridge(bridge_url: str, device: dict[str, Any], user_id: int, turn_on: bool) -> None:
+    payload = json.dumps({"device": device, "user_id": int(user_id), "turn_on": bool(turn_on)}).encode("utf-8")
+    request = Request(
+        bridge_url.rstrip("/") + "/publish_switch",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            if response.status >= 400:
+                raise HunonicMqttError(f"MQTT bridge failed with HTTP {response.status}")
+    except Exception as err:
+        raise HunonicMqttError(f"MQTT bridge failed after direct connect failed: {err}") from err
 
 
 def _resolve_ipv4(host: str, port: int) -> list[str]:
