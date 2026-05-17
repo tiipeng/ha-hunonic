@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import socket
+import time
 from typing import Any
 from urllib.parse import urlencode
 
@@ -114,17 +115,25 @@ def publish_switch_command(device: dict[str, Any], user_id: int, turn_on: bool) 
     # each IPv4 address before surfacing the error to Home Assistant.
     errors: list[str] = []
     connected = False
-    for addr in _resolve_ipv4(host, port):
-        try:
-            result = client.connect(addr, port, keepalive=20)
-            if result == 0:
-                connected = True
-                break
-            errors.append(f"{addr}: MQTT connect rc={result}")
-        except OSError as err:
-            errors.append(f"{addr}: {err}")
+    addresses = _resolve_ipv4(host, port)
+    # Docker/Colima networking can briefly return ENETUNREACH for every route
+    # even though retrying seconds later works. Retry the full address set a few
+    # times so a transient VM/NAT flap does not make a HA button press fail.
+    for attempt in range(5):
+        for addr in addresses:
+            try:
+                result = client.connect(addr, port, keepalive=20)
+                if result == 0:
+                    connected = True
+                    break
+                errors.append(f"attempt {attempt + 1} {addr}: MQTT connect rc={result}")
+            except OSError as err:
+                errors.append(f"attempt {attempt + 1} {addr}: {err}")
+        if connected:
+            break
+        time.sleep(0.75)
     if not connected:
-        raise HunonicMqttError("MQTT connect failed: " + "; ".join(errors))
+        raise HunonicMqttError("MQTT connect failed: " + "; ".join(errors[-len(addresses):]))
     client.loop_start()
     try:
         info = client.publish(topic, payload=payload, qos=0, retain=False)
