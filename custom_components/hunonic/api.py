@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import socket
 from typing import Any
 from urllib.parse import urlencode
 
@@ -103,11 +104,27 @@ def publish_switch_command(device: dict[str, Any], user_id: int, turn_on: bool) 
         raise HunonicMqttError("Device has no MQTT publish topic")
     _command_json, payload = build_switch_command(device, user_id, turn_on)
     server = _mqtt_server_info()
+    host = str(server.get("server"))
+    port = int(server.get("port", 1883))
     client = mqtt.Client(protocol=mqtt.MQTTv311)
     client.username_pw_set(server.get("user"), server.get("pass"))
-    result = client.connect(server.get("server"), int(server.get("port", 1883)), keepalive=20)
-    if result != 0:
-        raise HunonicMqttError(f"MQTT connect failed: {result}")
+
+    # Hunonic's broker hostname returns multiple A records. In Colima/Docker on
+    # macOS, some of those routes intermittently fail with ENETUNREACH, so try
+    # each IPv4 address before surfacing the error to Home Assistant.
+    errors: list[str] = []
+    connected = False
+    for addr in _resolve_ipv4(host, port):
+        try:
+            result = client.connect(addr, port, keepalive=20)
+            if result == 0:
+                connected = True
+                break
+            errors.append(f"{addr}: MQTT connect rc={result}")
+        except OSError as err:
+            errors.append(f"{addr}: {err}")
+    if not connected:
+        raise HunonicMqttError("MQTT connect failed: " + "; ".join(errors))
     client.loop_start()
     try:
         info = client.publish(topic, payload=payload, qos=0, retain=False)
@@ -117,6 +134,16 @@ def publish_switch_command(device: dict[str, Any], user_id: int, turn_on: bool) 
         client.disconnect()
     if not info.is_published():
         raise HunonicMqttError("MQTT publish timed out")
+
+
+def _resolve_ipv4(host: str, port: int) -> list[str]:
+    addresses: list[str] = []
+    for family, _socktype, _proto, _canonname, sockaddr in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+        if family == socket.AF_INET:
+            ip = sockaddr[0]
+            if ip not in addresses:
+                addresses.append(ip)
+    return addresses or [host]
 
 
 def hunonic_signature(params: dict[str, Any]) -> str:
