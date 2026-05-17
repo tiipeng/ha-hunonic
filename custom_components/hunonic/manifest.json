@@ -7,6 +7,6 @@
   "documentation": "https://github.com/tiipeng/ha-hunonic",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/tiipeng/ha-hunonic/issues",
-  "requirements": [],
+  "requirements": ["paho-mqtt>=2.1.0"],
   "version": "0.1.0"
 }

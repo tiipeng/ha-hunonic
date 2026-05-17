@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from typing import Any
 from urllib.parse import urlencode
 
@@ -11,6 +12,12 @@ from .const import APP_NAME, APP_ROLE, DEFAULT_BASE_URL
 
 _ACCESS_KEY = "accessKey98ccdcbbe7b5528bec0ca31bbe8d93b4e76590dd"
 _SIGN_SALT = "HUNONICBIGBUG94d3c445e72ae7805fca3489edac9608c893e66b"
+_MQTT_SERVER_B64 = "QS4npF55SVwlPsXdQv8N6Ggej7kNcW6TGz4HpBfPwctPKBsL8hyiM4g4rMw57DjLZIG7TUoxtfuXhX+e5OwjJbc2nOado6wycygF4nwxXuLd0hvOfd4+7MabxyW28bhZLRDr3QYOFfKv2ygK7vpYQVpbi9NpxvwVw5g9bECPS/LdL0COsTYaYS+j5nNLoxgjHj5eSnOBebSQh7J23Otwjg=="
+_MQTT_INFO_KEY = b"yAlaCKUYI3qr0kTd"
+_MQTT_INFO_IV = b"QFjnL4GVODlNB0eZ"
+_ZERO16 = b"0000000000000000"
+_KEY_ACTION_USER = 209
+_SWITCH_CONTROL_DEVICE = 0
 
 
 class HunonicError(Exception):
@@ -21,8 +28,95 @@ class HunonicAuthError(HunonicError):
     """Authentication failed."""
 
 
+class HunonicMqttError(HunonicError):
+    """MQTT command failed."""
+
+
 def _b64(value: str) -> str:
     return base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+
+def _pkcs7_unpad(data: bytes) -> bytes:
+    pad_len = data[-1]
+    if pad_len < 1 or pad_len > 16:
+        raise HunonicMqttError("Invalid MQTT server info padding")
+    return data[:-pad_len]
+
+
+def _pkcs7_pad(data: bytes) -> bytes:
+    pad_len = 16 - (len(data) % 16)
+    return data + bytes([pad_len]) * pad_len
+
+
+def _aes_cbc_encrypt(data: bytes, key: bytes, iv: bytes) -> bytes:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+    return encryptor.update(_pkcs7_pad(data)) + encryptor.finalize()
+
+
+def _aes_cbc_decrypt(data: bytes, key: bytes, iv: bytes) -> bytes:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+    return _pkcs7_unpad(decryptor.update(data) + decryptor.finalize())
+
+
+def _mqtt_server_info() -> dict[str, Any]:
+    raw = _aes_cbc_decrypt(base64.b64decode(_MQTT_SERVER_B64), _MQTT_INFO_KEY, _MQTT_INFO_IV)
+    return json.loads(raw.decode("utf-8"))
+
+
+def _derive_switch_key_iv(root_id: str) -> tuple[bytes, bytes]:
+    seed = _aes_cbc_encrypt(str(root_id).encode("utf-8"), _ZERO16, _ZERO16)
+    if len(seed) < 28:
+        raise HunonicMqttError("Derived MQTT switch key is too short")
+    return seed[4:20], seed[12:28]
+
+
+def _switch_action_code(index_in_root: int, turn_on: bool) -> int:
+    base = int(index_in_root) * 2
+    return base - 1 if turn_on else base
+
+
+def build_switch_command(device: dict[str, Any], user_id: int, turn_on: bool) -> tuple[str, bytes]:
+    """Build the Hunonic MQTT switch command JSON and encrypted payload."""
+    root_id = str(device["root_id"])
+    root_type = str(device["root_type"])
+    command = {
+        "u": int(user_id),
+        root_type: _SWITCH_CONTROL_DEVICE,
+        "act_id": _KEY_ACTION_USER,
+        "action": _switch_action_code(int(device.get("index_in_root", 1)), turn_on),
+    }
+    command_json = json.dumps(command, separators=(",", ":"), ensure_ascii=False)
+    key, iv = _derive_switch_key_iv(root_id)
+    return command_json, _aes_cbc_encrypt(command_json.encode("utf-8"), key, iv)
+
+
+def publish_switch_command(device: dict[str, Any], user_id: int, turn_on: bool) -> None:
+    """Publish one MQTT switch command. Runs in an executor from HA entity code."""
+    import paho.mqtt.client as mqtt
+
+    topic = device.get("topicpub") or device.get("topicsub")
+    if not topic:
+        raise HunonicMqttError("Device has no MQTT publish topic")
+    _command_json, payload = build_switch_command(device, user_id, turn_on)
+    server = _mqtt_server_info()
+    client = mqtt.Client(protocol=mqtt.MQTTv311)
+    client.username_pw_set(server.get("user"), server.get("pass"))
+    result = client.connect(server.get("server"), int(server.get("port", 1883)), keepalive=20)
+    if result != 0:
+        raise HunonicMqttError(f"MQTT connect failed: {result}")
+    client.loop_start()
+    try:
+        info = client.publish(topic, payload=payload, qos=0, retain=False)
+        info.wait_for_publish(timeout=10)
+    finally:
+        client.loop_stop()
+        client.disconnect()
+    if not info.is_published():
+        raise HunonicMqttError("MQTT publish timed out")
 
 
 def hunonic_signature(params: dict[str, Any]) -> str:

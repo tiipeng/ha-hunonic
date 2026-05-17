@@ -6,4 +6,4 @@ CONF_BASE_URL = "base_url"
 CONF_HOME_ID = "home_id"
 CONF_TOKEN_ID = "token_id"
 
-PLATFORMS = ["sensor", "binary_sensor"]
+PLATFORMS = ["sensor", "binary_sensor", "switch"]
