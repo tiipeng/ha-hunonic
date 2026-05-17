@@ -1,0 +1,7 @@
+{
+  "name": "Hunonic",
+  "content_in_root": false,
+  "filename": "hunonic.zip",
+  "render_readme": true,
+  "homeassistant": "2024.6.0"
+}

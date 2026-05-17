@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hunonic",
+        "description": "Connect to the Hunonic cloud API. The password is used once to obtain a token and is not stored.",
+        "data": {
+          "username": "Phone number or email",
+          "password": "Password",
+          "base_url": "API base URL"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid Hunonic username or password.",
+      "cannot_connect": "Could not connect to Hunonic.",
+      "unknown": "Unexpected error. Check Home Assistant logs."
+    },
+    "abort": {
+      "already_configured": "This Hunonic account is already configured."
+    }
+  }
+}
